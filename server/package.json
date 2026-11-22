@@ -5,7 +5,8 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
-    "check": "node --check src/index.js && node --check src/auth.js && node --check src/middleware/auth.js"
+    "check": "node --check src/index.js && node --check src/auth.js && node --check src/middleware/auth.js",
+    "seed:demo": "node scripts/seed-demo.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
