@@ -1,85 +1,25 @@
 # Equiply API
 
-Express API using MongoDB, Better Auth (email/password + optional Google OAuth), role/ownership middleware, equipment queries, bookings, favorites, admin/owner APIs, and Stripe Checkout.
+Express API using MongoDB, Better Auth (email/password and optional Google OAuth), session-based authorization, equipment, bookings, favorites, owner/admin APIs, and Stripe Checkout.
 
-## 1. Configure environment
+## Setup
+1. Copy `.env.example` to `.env`.
+2. Set `MONGODB_URI`, a 32+ character `BETTER_AUTH_SECRET`, and your frontend/backend URLs.
+3. Optional: configure Google OAuth and Stripe test credentials.
+4. Run `npm install`, then `npm run dev`.
+5. Check `http://localhost:5000/api/health`.
 
-Copy `.env.example` to `.env`, then fill in your own values:
+## Auth
+Better Auth handles `/api/auth/*`. The frontend should use cookie-based sessions and send requests with `credentials: 'include'`. Do not send or trust role values from the client. Google callback URL (local): `http://localhost:5000/api/auth/callback/google`.
 
-- `MONGODB_URI`: MongoDB Atlas connection string.
-- `DB_NAME`: database name (default `equiply`).
-- `BETTER_AUTH_SECRET`: random secret with at least 32 characters.
-- `BETTER_AUTH_URL`: backend origin, e.g. `http://localhost:5000`.
-- `CLIENT_URL`: frontend origin, e.g. `http://localhost:3000`. Multiple origins can be comma-separated.
-- `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`: optional Google OAuth credentials.
-- `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET`: Stripe test-mode credentials.
-- `STRIPE_CURRENCY`: three-letter currency code (default `usd`).
+## API
+See `API_DOCUMENTATION.md` for the endpoint overview. Protected routes use the Better Auth session cookie.
 
-Never commit `.env` or paste production credentials into source files.
+## Stripe
+Checkout: `POST /api/payments/checkout/:bookingId`. Webhook: `POST /api/payments/webhook`. Configure the webhook endpoint in Stripe and use test keys only while developing. The webhook requires its signing secret.
 
-## 2. Install and run
+## Demo seed
+`npm run seed:demo` creates/resets demo credentials. Run only in a development database; never use these credentials in production.
 
-```bash
-npm install
-npm run dev
-```
-
-The API listens on port 5000 by default. Check `/api/health`.
-
-## 3. Better Auth setup
-
-Better Auth stores user, session, account and verification records in MongoDB. Application user records use the `users` collection. Roles are server-controlled and default to `customer`; do not accept a role from the registration form.
-
-Email/password endpoints are handled by Better Auth under `/api/auth/*`:
-- `POST /api/auth/sign-up/email`
-- `POST /api/auth/sign-in/email`
-- `POST /api/auth/sign-out`
-- `GET /api/auth/get-session`
-
-Google OAuth is enabled only when both Google environment variables are set. Add this callback URL to the Google OAuth client:
-`http://localhost:5000/api/auth/callback/google`
-
-The frontend must send cookies for API requests:
-```ts
-fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/bookings/mine`, {
-  credentials: 'include'
-});
-```
-Use `credentials: 'include'` for Better Auth client requests too. The backend CORS allowlist must contain the exact frontend origin.
-
-## 4. Stripe setup
-
-Create a Stripe Checkout session:
-`POST /api/payments/checkout/:bookingId`
-
-The signed webhook endpoint is:
-`POST /api/payments/webhook`
-
-For local development, forward Stripe test events to:
-`http://localhost:5000/api/payments/webhook`
-
-Listen for `checkout.session.completed` and `checkout.session.expired`. The webhook uses the raw request body and signature verification. Do not call the webhook route from the browser.
-
-## 5. Main API routes
-
-- `GET /api/equipment`: search, category, location, type, minPrice, maxPrice, availableFrom, availableTo, sort, page and limit.
-- `GET /api/equipment/:id`
-- `POST /api/equipment` (owner/admin)
-- `GET /api/equipment/owner/mine`
-- `PATCH /api/equipment/:id` and `DELETE /api/equipment/:id` (owner/admin; ownership checked)
-- `POST /api/bookings`, `GET /api/bookings/mine`, `GET /api/bookings/owner`
-- `PATCH /api/bookings/:id/status`
-- `GET /api/favorites`, `POST /api/favorites/:equipmentId`, `DELETE /api/favorites/:equipmentId`
-- `POST /api/payments/checkout/:bookingId`
-- `GET /api/profile`, `PATCH /api/profile`
-- `GET /api/owner/analytics`
-- Admin: `/api/admin/stats`, `/users`, `/users/:id/role`, `/equipment`, `/equipment/:id/status`, `/bookings`
-
-Protected application routes use the Better Auth session cookie. The backend loads the user and role from MongoDB on each authenticated request; do not trust role values sent by the client.
-
-## Important limitations
-
-- MongoDB and Stripe require valid credentials and have not been live-tested in this environment.
-- Google OAuth requires valid Google Cloud credentials and an exact configured redirect URI.
-- Booking overlap checking is a query-based guard, not a transaction-backed reservation lock; high-concurrency booking attempts still need transaction/locking work.
-- Before production, add automated integration tests, configure HTTPS, review Stripe currency/pricing units, and confirm the frontend uses cookie-based Better Auth sessions.
+## Notes
+Credentials and environment files are not included in this package. MongoDB/Stripe/Google OAuth integration still requires your own credentials and local testing.

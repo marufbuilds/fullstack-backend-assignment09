@@ -66,8 +66,11 @@ app.patch('/api/profile', authenticate, async (req, res, next) => {
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 app.use((req, res) => res.status(404).json({ message: 'Route not found' }));
 app.use((error, req, res, next) => {
-  console.error(error);
   if (res.headersSent) return next(error);
+  if (error?.message === 'Origin not allowed by CORS') {
+    return res.status(403).json({ message: 'Origin not allowed' });
+  }
+  console.error(error);
   return res.status(500).json({ message: 'Server error' });
 });
 
