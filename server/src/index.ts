@@ -1,9 +1,15 @@
  
 import 'dotenv/config';
-import express, { type Request, type Response, type NextFunction } from 'express';
+import express, {
+  type Request,
+  type Response,
+  type NextFunction,
+} from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
+import { fromNodeHeaders } from 'better-auth/node';
+import { ObjectId } from 'mongodb';
 
 import { connectDB } from './db.js';
 import { createAuth } from './auth.js';
@@ -18,12 +24,18 @@ import { stripeWebhook } from './routes/webhook.js';
 
 const app = express();
 
+app.set('trust proxy', 1);
+
 app.use(helmet());
 
-app.use(cors({
-  origin: process.env.CLIENT_URL || 'http://localhost:3000',
-  credentials: true,
-}));
+app.use(
+  cors({
+    origin: (process.env.CLIENT_URL || 'http://localhost:3000')
+      .split(',')
+      .map(value => value.trim()),
+    credentials: true,
+  })
+);
 
 // Stripe webhook must be before express.json()
 app.post(
@@ -32,7 +44,7 @@ app.post(
   stripeWebhook
 );
 
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
 
 let initializationPromise: Promise<void> | null = null;
 
@@ -57,7 +69,6 @@ function ensureInitialized(
     .then(() => next())
     .catch((error: unknown) => {
       console.error('Server initialization failed:', error);
-
       initializationPromise = null;
 
       res.status(500).json({
@@ -74,7 +85,101 @@ app.get('/api/health', (_req, res) => {
   });
 });
 
+// Initialize database and authentication before API routes
 app.use(ensureInitialized);
+
+// Profile: get current logged-in user
+app.get('/api/profile', async (req, res) => {
+  try {
+    const auth = app.locals.auth;
+
+    const session = await auth.api.getSession({
+      headers: fromNodeHeaders(req.headers),
+    });
+
+    if (!session?.user?.id) {
+      return res.status(401).json({
+        message: 'Authentication required',
+      });
+    }
+
+    return res.json({
+      user: session.user,
+    });
+  } catch (error) {
+    console.error('Profile fetch error:', error);
+
+    return res.status(500).json({
+      message: 'Could not load profile',
+    });
+  }
+});
+
+// Profile: update current logged-in user
+app.patch('/api/profile', async (req, res) => {
+  try {
+    const auth = app.locals.auth;
+
+    const session = await auth.api.getSession({
+      headers: fromNodeHeaders(req.headers),
+    });
+
+    if (!session?.user?.id) {
+      return res.status(401).json({
+        message: 'Authentication required',
+      });
+    }
+
+    const name = req.body?.name;
+
+    if (
+      typeof name !== 'string' ||
+      name.trim().length < 2 ||
+      name.trim().length > 80
+    ) {
+      return res.status(400).json({
+        message: 'Name must be between 2 and 80 characters',
+      });
+    }
+
+    const userId = String(session.user.id);
+
+    const filter = ObjectId.isValid(userId)
+      ? {
+          $or: [
+            { _id: userId },
+            { _id: new ObjectId(userId) },
+          ],
+        }
+      : { _id: userId };
+
+    const result = await app.locals.db
+      .collection('users')
+      .updateOne(filter, {
+        $set: {
+          name: name.trim(),
+          updatedAt: new Date(),
+        },
+      });
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({
+        message: 'User profile not found',
+      });
+    }
+
+    return res.json({
+      message: 'Profile updated',
+      name: name.trim(),
+    });
+  } catch (error) {
+    console.error('Profile update error:', error);
+
+    return res.status(500).json({
+      message: 'Could not update profile',
+    });
+  }
+});
 
 // Better Auth
 app.all('/api/auth/*', async (req, res) => {
@@ -100,20 +205,21 @@ const paymentLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-app.use('/api/payments', paymentLimiter);
-
 // API routes
 app.use('/api/equipment', equipmentRoutes);
 app.use('/api/bookings', bookingRoutes);
 app.use('/api/favorites', favoritesRoutes);
 app.use('/api/owner', ownerRoutes);
 app.use('/api/admin', adminRoutes);
-app.use('/api/payments', paymentRoutes);
+app.use('/api/payments', paymentLimiter, paymentRoutes);
 
 // 404
-app.use((_req, res) => {
-  res.status(404).json({
+app.use((req, res) => {
+  console.log('[404]', req.method, req.originalUrl);
+
+  return res.status(404).json({
     message: 'Route not found',
+    path: req.originalUrl,
   });
 });
 
@@ -124,9 +230,9 @@ app.use((
   res: Response,
   _next: NextFunction
 ) => {
-  console.error(error);
+  console.error('Server error:', error);
 
-  res.status(500).json({
+  return res.status(500).json({
     message: 'Internal server error',
   });
 });

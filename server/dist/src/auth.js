@@ -48,6 +48,14 @@ export function createAuth() {
         session: {
             expiresIn: 60 * 60 * 24 * 7,
             updateAge: 60 * 60 * 24
+        },
+        advanced: {
+            defaultCookieAttributes: {
+                sameSite: 'none',
+                secure: true,
+                httpOnly: true,
+                path: '/'
+            }
         }
     });
     return authInstance;

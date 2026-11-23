@@ -21,29 +21,28 @@ import { authenticate } from './middleware/auth.js';
 
 const app = express();
 
-// Trust Vercel's reverse proxy
 app.set('trust proxy', 1);
 
-// Check required environment variables
+// Required environment variables
 const required = ['MONGODB_URI', 'BETTER_AUTH_SECRET'];
-
 const missing = required.filter(key => !process.env[key]);
 
-if (missing.length) {
+if (missing.length > 0) {
   console.error(
     `Missing required environment variables: ${missing.join(', ')}`
   );
   process.exit(1);
 }
 
-if (process.env.BETTER_AUTH_SECRET.length < 32 ) {
+if (process.env.BETTER_AUTH_SECRET.length < 32) {
   console.error('BETTER_AUTH_SECRET must contain at least 32 characters.');
   process.exit(1);
 }
 
-// Security headers
+// Security
 app.use(helmet());
-// CORS configuration
+
+// CORS
 const allowedOrigins = (process.env.CLIENT_URL || 'http://localhost:3000')
   .split(',')
   .map(value => value.trim())
@@ -62,123 +61,109 @@ app.use(
   })
 );
 
-// Stripe webhook — raw body required for signature verification
+// Request logging for debugging
+app.use((req, res, next) => {
+  console.log(`[REQUEST] ${req.method} ${req.originalUrl}`);
+  next();
+});
+
+// Stripe webhook — raw body required
 app.post(
   '/api/payments/webhook',
   express.raw({ type: 'application/json' }),
   stripeWebhook
 );
 
-// Register API routes
-function registerApiRoutes() {
-  app.use(express.json({ limit: '1mb' }));
+// JSON body parser
+app.use(express.json({ limit: '1mb' }));
 
-  // Equipment
-  app.use('/api/equipment', equipmentRoutes);
+// Health check
+app.get('/api/health', (req, res) => {
+  res.json({ ok: true });
+});
 
-  // Bookings
-  app.use('/api/bookings', bookingsRoutes);
+// Profile GET
+app.get('/api/profile', authenticate, (req, res) => {
+  const { _id, ...user } = req.user;
 
-  // Favorites
-  app.use('/api/favorites', favoritesRoutes);
-
-  // Admin
-  app.use('/api/admin', adminRoutes);
-
-  // Owner
-  app.use('/api/owner', ownerRoutes);
-
-  // Payments
-  app.use(
-    '/api/payments',
-    rateLimit({
-      windowMs: 15 * 60 * 1000,
-      max: 30,
-    }),
-    paymentRoutes
-  );
-
-  // Profile
-  app.get('/api/profile', authenticate, (req, res) => {
-    res.json({
-      user: {
-        ...req.user,
-        id: String(req.user._id),
-      },
-    });
+  return res.json({
+    user: {
+      ...user,
+      id: String(req.user._id),
+    },
   });
+});
 
-  app.patch('/api/profile', authenticate, async (req, res, next) => {
-    try {
-      const name = req.body?.name;
+// Profile PATCH
+app.patch('/api/profile', authenticate, async (req, res, next) => {
+  try {
+    const name = req.body?.name;
 
-      if (
-        typeof name !== 'string' ||
-        name.trim().length < 2 ||
-        name.trim().length > 80
-      ) {
-        return res.status(400).json({
-          message: 'Name must be between 2 and 80 characters',
-        });
-      }
-
-      await getDB()
-        .collection('users')
-        .updateOne(
-          { _id: req.user._id },
-          {
-            $set: {
-              name: name.trim(),
-              updatedAt: new Date(),
-            },
-          }
-        );
-
-      return res.json({
-        message: 'Profile updated',
-        name: name.trim(),
+    if (
+      typeof name !== 'string' ||
+      name.trim().length < 2 ||
+      name.trim().length > 80
+    ) {
+      return res.status(400).json({
+        message: 'Name must be between 2 and 80 characters',
       });
-    } catch (error) {
-      return next(error);
-    }
-  });
-
-  // Health check
-  app.get('/api/health', (req, res) => {
-    res.json({ ok: true });
-  });
-
-  // 404 handler
-  app.use((req, res) => {
-    res.status(404).json({ message: 'Route not found' });
-  });
-
-  // Error handler
-  app.use((error, req, res, next) => {
-    if (res.headersSent) {
-      return next(error);
     }
 
-    if (error?.message === 'Origin not allowed by CORS') {
-      return res.status(403).json({ message: 'Origin not allowed' });
-    }
+    await getDB().collection('users').updateOne(
+      { _id: req.user._id },
+      {
+        $set: {
+          name: name.trim(),
+          updatedAt: new Date(),
+        },
+      }
+    );
 
-    console.error(error);
+    return res.json({
+      message: 'Profile updated',
+      name: name.trim(),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
 
-    return res.status(500).json({ message: 'Server error' });
-  });
-}
+// Equipment
+app.use('/api/equipment', equipmentRoutes);
 
-// Start backend
+// Bookings
+app.use('/api/bookings', bookingsRoutes);
+
+// Favorites
+app.use('/api/favorites', favoritesRoutes);
+
+// Admin
+app.use('/api/admin', adminRoutes);
+
+// Owner
+app.use('/api/owner', ownerRoutes);
+
+// Payments
+app.use(
+  '/api/payments',
+  rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 30,
+  }),
+  paymentRoutes
+);
+
+// Initialize database and authentication
 const port = Number(process.env.PORT || 5000);
 
-connectDB()
-  .then(() => {
-    const auth = createAuth();
+async function startServer() {
+  try {
+    await connectDB();
 
+    const auth = createAuth();
     const authHandler = toNodeHandler(auth);
 
-    // Better Auth
+    // Better Auth routes
     app.all(
       '/api/auth/*',
       rateLimit({
@@ -188,13 +173,48 @@ connectDB()
       authHandler
     );
 
-    registerApiRoutes();
+    // 404 handler
+    app.use((req, res) => {
+      console.log('[404]', req.method, req.originalUrl);
+
+      return res.status(404).json({
+        message: 'Route not found',
+        path: req.originalUrl,
+        method: req.method,
+      });
+    });
+
+    // Error handler
+    app.use((error, req, res, next) => {
+      if (res.headersSent) {
+        return next(error);
+      }
+
+      if (error?.message === 'Origin not allowed by CORS') {
+        return res.status(403).json({
+          message: 'Origin not allowed',
+        });
+      }
+
+      console.error('[SERVER ERROR]', error);
+
+      return res.status(500).json({
+        message: 'Server error',
+      });
+    });
 
     app.listen(port, () => {
-      console.log(`Equiply API listening on ${port}`);
+      console.log('--------------------------------');
+      console.log('Equiply backend started');
+      console.log(`Port: ${port}`);
+      console.log(`Health: http://localhost:${port}/api/health`);
+      console.log(`Profile: http://localhost:${port}/api/profile`);
+      console.log('--------------------------------');
     });
-  })
-  .catch(error => {
-    console.error('Database connection failed:', error);
+  } catch (error) {
+    console.error('Backend startup failed:', error);
     process.exit(1);
-  });
+  }
+}
+
+startServer();
