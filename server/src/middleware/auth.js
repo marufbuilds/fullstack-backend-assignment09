@@ -35,14 +35,19 @@ export async function authenticate(req, res, next) {
 }
 
 export const allowRoles = (...roles) => (req, res, next) => {
-  const userRole = String(req.user?.role || '').trim().toLowerCase();
+  const userRole = String(req.user?.role || '')
+    .trim()
+    .toLowerCase();
 
-  if (!userRole || !roles.map((r) => String(r).toLowerCase()).includes(userRole)) {
+  const allowedRoles = roles.map((role) =>
+    String(role).trim().toLowerCase()
+  );
+
+  if (!userRole || !allowedRoles.includes(userRole)) {
     return res.status(403).json({
-      message: 'Forbidden',
+      message: 'You do not have permission to access this resource',
     });
   }
 
   return next();
 };
- 
