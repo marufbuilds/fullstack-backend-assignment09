@@ -3,8 +3,8 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { ObjectId } from 'mongodb';
 
 // Load JavaScript modules
-const { getDB } = require('../lib/db.js');
-const { authenticate, allowRoles } = require('../middleware/auth.js');
+import { getDB } from '../db.js';
+import { authenticate, allowRoles } from '../middleware/auth.js';
 
 const router = Router();
 

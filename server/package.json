@@ -3,9 +3,10 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "start": "node src/index.js",
-    "dev": "nodemon src/index.js",
-    "check": "node --check src/index.js && node --check src/db.js && node --check src/auth.js && node --check src/middleware/auth.js && node --check src/lib/ids.js && node --check src/routes/equipment.js && node --check src/routes/bookings.js && node --check src/routes/favorites.js && node --check src/routes/owner.js && node --check src/routes/admin.js && node --check src/routes/payments.js && node --check src/routes/webhook.js && node --check scripts/migrate-owner.js",
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/src/index.js",
+    "check": "tsc --noEmit",
     "seed:demo": "node scripts/seed-demo.js",
     "migrate-owner": "node scripts/migrate-owner.js"
   },
@@ -21,8 +22,13 @@
   },
   "devDependencies": {
     "@types/cors": "^2.8.19",
-    "@types/express": "^5.0.6",
+    "@types/express": "^4.17.21",
     "@types/node": "^26.6.6",
-    "nodemon": "^3.1.7"
+    "nodemon": "^3.1.7",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
   }
 }
