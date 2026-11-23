@@ -1,10 +1,24 @@
-
+ 
 import Stripe from 'stripe';
 import { ObjectId } from 'mongodb';
 import { getDB } from '../db.js';
 
+const idValues = (id) => {
+  const stringId = String(id);
+  const values = [stringId];
+
+  if (ObjectId.isValid(stringId)) {
+    values.push(new ObjectId(stringId));
+  }
+
+  return values;
+};
+
 export async function stripeWebhook(req, res) {
-  if (!process.env.STRIPE_SECRET_KEY || !process.env.STRIPE_WEBHOOK_SECRET) {
+  if (
+    !process.env.STRIPE_SECRET_KEY ||
+    !process.env.STRIPE_WEBHOOK_SECRET
+  ) {
     return res.status(503).send('Webhook not configured');
   }
 
@@ -25,8 +39,10 @@ export async function stripeWebhook(req, res) {
 
   const db = getDB();
   const events = db.collection('stripeEvents');
+  const payments = db.collection('payments');
+  const bookings = db.collection('bookings');
 
-  // Register each Stripe event only once.
+  // Prevent processing the same event multiple times.
   try {
     await events.insertOne({
       eventId: event.id,
@@ -37,7 +53,10 @@ export async function stripeWebhook(req, res) {
   } catch (error) {
     if (error.code !== 11000) {
       console.error('Could not register Stripe event:', error);
-      return res.status(500).json({ message: 'Could not register event' });
+
+      return res.status(500).json({
+        message: 'Could not register event'
+      });
     }
 
     const retry = await events.updateOne(
@@ -50,18 +69,25 @@ export async function stripeWebhook(req, res) {
           status: 'processing',
           retryAt: new Date()
         },
-        $unset: { error: '' }
+        $unset: {
+          error: ''
+        }
       }
     );
 
     if (!retry.modifiedCount) {
-      return res.json({ received: true, duplicate: true });
+      return res.json({
+        received: true,
+        duplicate: true
+      });
     }
   }
 
   try {
     const session = event.data.object;
+    const now = new Date();
 
+    // Successful checkout
     if (
       event.type === 'checkout.session.completed' ||
       event.type === 'checkout.session.async_payment_succeeded'
@@ -70,16 +96,16 @@ export async function stripeWebhook(req, res) {
         const bookingId = session.metadata?.bookingId;
         const renterId = session.metadata?.renterId;
 
-        if (!ObjectId.isValid(bookingId) || !ObjectId.isValid(renterId)) {
+        if (!ObjectId.isValid(bookingId) || !renterId) {
           throw new Error('Invalid booking or renter metadata');
         }
 
         const bookingObjectId = new ObjectId(bookingId);
-        const renterObjectId = new ObjectId(renterId);
+        const renterIdValues = idValues(renterId);
 
-        const payment = await db.collection('payments').findOne({
+        const payment = await payments.findOne({
           bookingId: bookingObjectId,
-          renterId: renterObjectId,
+          renterId: { $in: renterIdValues },
           checkoutSessionId: session.id
         });
 
@@ -87,57 +113,65 @@ export async function stripeWebhook(req, res) {
           throw new Error('Matching payment record not found');
         }
 
-        // Never trust the amount or currency from the browser.
+        // Verify the Stripe payment against our saved payment.
         if (
           Number(session.amount_total) !== Number(payment.amountMinor) ||
-          String(session.currency).toLowerCase() !== payment.currency
+          String(session.currency).toLowerCase() !==
+            String(payment.currency).toLowerCase()
         ) {
-          throw new Error('Stripe payment amount or currency does not match');
+          throw new Error('Stripe amount or currency mismatch');
         }
 
-        const booking = await db.collection('bookings').findOne({
+        const booking = await bookings.findOne({
           _id: bookingObjectId,
-          renterId: renterObjectId
+          renterId: { $in: renterIdValues }
         });
 
         if (!booking) {
           throw new Error('Matching booking not found');
         }
 
-        const now = new Date();
-
-        // Record the actual payment even if the booking needs manual review.
-        await db.collection('payments').updateOne(
+        // Save payment details.
+        await payments.updateOne(
           { _id: payment._id },
           {
             $set: {
               status: 'paid',
-              paidAt: now,
+              paidAt: payment.paidAt || now,
               stripeEventId: event.id,
-              paymentIntentId: session.payment_intent || null
+              paymentIntentId: session.payment_intent || null,
+              updatedAt: now
             }
           }
         );
 
-        if (booking.status === 'pending' && booking.paymentStatus === 'unpaid') {
-          const result = await db.collection('bookings').updateOne(
+        // Payment does not approve the booking.
+        // The owner still needs to confirm it.
+        if (
+          booking.status === 'pending' &&
+          ['unpaid', 'paid'].includes(booking.paymentStatus)
+        ) {
+          const result = await bookings.updateOne(
             {
               _id: bookingObjectId,
+              renterId: { $in: renterIdValues },
               status: 'pending',
-              paymentStatus: 'unpaid'
+              paymentStatus: booking.paymentStatus
             },
             {
               $set: {
                 paymentStatus: 'paid',
-                status: 'confirmed',
-                paidAt: now,
+                paidAt: booking.paidAt || now,
                 updatedAt: now
+              },
+              $unset: {
+                expiresAt: ''
               }
             }
           );
 
           if (!result.modifiedCount) {
-            await db.collection('payments').updateOne(
+            await payments.updateOne(
               { _id: payment._id },
               {
                 $set: {
@@ -146,12 +180,9 @@ export async function stripeWebhook(req, res) {
               }
             );
           }
-        } else if (
-          booking.paymentStatus !== 'paid' ||
-          booking.status === 'cancelled' ||
-          booking.status === 'rejected'
-        ) {
-          await db.collection('payments').updateOne(
+        } else {
+          // Payment succeeded but the booking is no longer eligible.
+          await payments.updateOne(
             { _id: payment._id },
             {
               $set: {
@@ -163,8 +194,9 @@ export async function stripeWebhook(req, res) {
       }
     }
 
+    // Expired Stripe checkout session.
     if (event.type === 'checkout.session.expired') {
-      await db.collection('payments').updateOne(
+      await payments.updateOne(
         {
           checkoutSessionId: session.id,
           status: 'pending'
@@ -172,8 +204,9 @@ export async function stripeWebhook(req, res) {
         {
           $set: {
             status: 'expired',
-            expiredAt: new Date(),
-            stripeEventId: event.id
+            expiredAt: now,
+            stripeEventId: event.id,
+            updatedAt: now
           }
         }
       );
@@ -181,7 +214,8 @@ export async function stripeWebhook(req, res) {
       const bookingId = session.metadata?.bookingId;
 
       if (ObjectId.isValid(bookingId)) {
-        await db.collection('bookings').updateOne(
+        // Only expire unpaid pending bookings.
+        await bookings.updateOne(
           {
             _id: new ObjectId(bookingId),
             status: 'pending',
@@ -191,7 +225,7 @@ export async function stripeWebhook(req, res) {
             $set: {
               status: 'cancelled',
               paymentStatus: 'expired',
-              updatedAt: new Date()
+              updatedAt: now
             }
           }
         );
@@ -208,7 +242,9 @@ export async function stripeWebhook(req, res) {
       }
     );
 
-    return res.json({ received: true });
+    return res.json({
+      received: true
+    });
   } catch (error) {
     await events.updateOne(
       { eventId: event.id },

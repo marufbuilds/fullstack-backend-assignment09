@@ -1,8 +1,9 @@
-
+ 
 import { Router } from 'express';
 import { ObjectId } from 'mongodb';
 import { getDB } from '../db.js';
 import { authenticate, allowRoles } from '../middleware/auth.js';
+import { idValues, normalizeId, ownerFilter } from '../lib/ids.js';
 
 const router = Router();
 
@@ -35,11 +36,12 @@ router.post('/', allowRoles('customer'), async (req, res, next) => {
 
     const start = new Date(startDate);
     const end = new Date(endDate);
+    const now = new Date();
 
     if (
       !Number.isFinite(start.getTime()) ||
       !Number.isFinite(end.getTime()) ||
-      start <= new Date() ||
+      start <= now ||
       end <= start
     ) {
       return res.status(400).json({
@@ -60,21 +62,29 @@ router.post('/', allowRoles('customer'), async (req, res, next) => {
       });
     }
 
-    if (String(equipment.ownerId) === String(req.user._id)) {
+    // Prevent owners from renting their own equipment.
+    if (
+      idValues(req.user._id).some(
+        (id) => String(id) === String(equipment.ownerId)
+      )
+    ) {
       return res.status(403).json({
         message: 'You cannot rent your own equipment',
       });
     }
 
+    // Check overlapping bookings.
     const conflict = await db.collection('bookings').findOne({
       equipmentId: equipment._id,
       startDate: { $lt: end },
       endDate: { $gt: start },
       $or: [
         { status: 'confirmed' },
+        { status: 'pending', paymentStatus: 'paid' },
         {
           status: 'pending',
-          expiresAt: { $gt: new Date() },
+          paymentStatus: 'unpaid',
+          expiresAt: { $gt: now },
         },
       ],
     });
@@ -100,11 +110,12 @@ router.post('/', allowRoles('customer'), async (req, res, next) => {
       });
     }
 
+    // New bookings always store IDs as strings.
     const booking = {
       equipmentId: equipment._id,
       equipmentTitle: equipment.title,
-      ownerId: equipment.ownerId,
-      renterId: req.user._id,
+      ownerId: normalizeId(equipment.ownerId),
+      renterId: normalizeId(req.user._id),
       customerPhone,
       startDate: start,
       endDate: end,
@@ -112,8 +123,8 @@ router.post('/', allowRoles('customer'), async (req, res, next) => {
       amount,
       status: 'pending',
       paymentStatus: 'unpaid',
-      createdAt: new Date(),
-      expiresAt: new Date(Date.now() + 30 * 60 * 1000),
+      createdAt: now,
+      expiresAt: new Date(now.getTime() + 30 * 60 * 1000),
     };
 
     const result = await db.collection('bookings').insertOne(booking);
@@ -127,12 +138,14 @@ router.post('/', allowRoles('customer'), async (req, res, next) => {
   }
 });
 
-// Get customer's bookings
+// Customer bookings
 router.get('/mine', async (req, res, next) => {
   try {
     const items = await getDB()
       .collection('bookings')
-      .find({ renterId: req.user._id })
+      .find({
+        renterId: { $in: idValues(req.user._id) },
+      })
       .sort({ createdAt: -1 })
       .toArray();
 
@@ -142,13 +155,13 @@ router.get('/mine', async (req, res, next) => {
   }
 });
 
-// Get owner's bookings (admins can see all bookings)
+// Owner bookings
 router.get('/owner', allowRoles('owner', 'admin'), async (req, res, next) => {
   try {
     const filter =
       req.user.role === 'admin'
         ? {}
-        : { ownerId: req.user._id };
+        : ownerFilter(req.user._id);
 
     const items = await getDB()
       .collection('bookings')
@@ -163,107 +176,146 @@ router.get('/owner', allowRoles('owner', 'admin'), async (req, res, next) => {
 });
 
 // Update booking status
-router.patch('/:id/status', allowRoles('owner', 'admin'), async (req, res, next) => {
-  try {
-    if (!ObjectId.isValid(req.params.id)) {
-      return res.status(400).json({
-        message: 'Invalid id',
-      });
-    }
-
-    const status = req.body?.status;
-
-    if (!['confirmed', 'rejected', 'completed', 'cancelled'].includes(status)) {
-      return res.status(400).json({
-        message: 'Invalid status',
-      });
-    }
-
-    const db = getDB();
-
-    const booking = await db.collection('bookings').findOne({
-      _id: new ObjectId(req.params.id),
-    });
-
-    if (!booking) {
-      return res.status(404).json({
-        message: 'Booking not found',
-      });
-    }
-
-    // Check ownership
-    if (
-      req.user.role !== 'admin' &&
-      String(booking.ownerId) !== String(req.user._id)
-    ) {
-      return res.status(403).json({
-        message: 'Not allowed',
-      });
-    }
-
-    // Only pending bookings can be confirmed
-    if (status === 'confirmed') {
-      if (booking.status !== 'pending') {
-        return res.status(409).json({
-          message: 'Only pending bookings can be confirmed',
+router.patch(
+  '/:id/status',
+  allowRoles('owner', 'admin'),
+  async (req, res, next) => {
+    try {
+      const routeId = String(req.params.id ?? '');
+      if (!ObjectId.isValid(routeId)) {
+        return res.status(400).json({
+          message: 'Invalid id',
         });
       }
 
-      if (booking.paymentStatus !== 'paid') {
-        return res.status(409).json({
-          message: 'Booking must be paid before confirmation',
+      const status = req.body?.status;
+
+      if (
+        !['confirmed', 'rejected', 'completed', 'cancelled'].includes(status)
+      ) {
+        return res.status(400).json({
+          message: 'Invalid status',
         });
       }
-    }
 
-    // Only pending bookings can be rejected
-    if (status === 'rejected' && booking.status !== 'pending') {
-      return res.status(409).json({
-        message: 'Only pending bookings can be rejected',
+      const db = getDB();
+      const bookingId = new ObjectId(routeId);
+
+      const booking = await db.collection('bookings').findOne({
+        _id: bookingId,
       });
-    }
 
-    // Only pending or confirmed bookings can be cancelled
-    if (
-      status === 'cancelled' &&
-      !['pending', 'confirmed'].includes(booking.status)
-    ) {
-      return res.status(409).json({
-        message: 'This booking cannot be cancelled',
+      if (!booking) {
+        return res.status(404).json({
+          message: 'Booking not found',
+        });
+      }
+
+      // Only the equipment owner or an admin can change this booking.
+      if (
+        req.user.role !== 'admin' &&
+        !idValues(req.user._id).some(
+          (id) => String(id) === String(booking.ownerId)
+        )
+      ) {
+        return res.status(403).json({
+          message: 'Not allowed',
+        });
+      }
+
+      // Confirm only paid, pending bookings.
+      if (status === 'confirmed') {
+        if (booking.status !== 'pending') {
+          return res.status(409).json({
+            message: 'Only pending bookings can be confirmed',
+          });
+        }
+
+        if (booking.paymentStatus !== 'paid') {
+          return res.status(409).json({
+            message: 'Booking must be paid before confirmation',
+          });
+        }
+      }
+
+      // Reject only unpaid pending bookings.
+      if (status === 'rejected') {
+        if (booking.status !== 'pending') {
+          return res.status(409).json({
+            message: 'Only pending bookings can be rejected',
+          });
+        }
+
+        if (booking.paymentStatus === 'paid') {
+          return res.status(409).json({
+            message: 'A refund must be processed before rejecting a paid booking',
+          });
+        }
+      }
+
+      // Cancel pending or confirmed bookings.
+      if (status === 'cancelled') {
+        if (!['pending', 'confirmed'].includes(booking.status)) {
+          return res.status(409).json({
+            message: 'This booking cannot be cancelled',
+          });
+        }
+
+        // Do not cancel paid bookings without refund handling.
+        if (booking.paymentStatus === 'paid') {
+          return res.status(409).json({
+            message: 'A refund must be processed before cancelling a paid booking',
+          });
+        }
+      }
+
+      // Complete rentals after their rental period ends.
+      if (status === 'completed') {
+        if (booking.status !== 'confirmed') {
+          return res.status(409).json({
+            message: 'Only confirmed bookings can be completed',
+          });
+        }
+
+        if (new Date(booking.endDate) > new Date()) {
+          return res.status(409).json({
+            message: 'Rental period has not ended yet',
+          });
+        }
+      }
+
+      const updateFilter = {
+        _id: bookingId,
+        status: booking.status,
+      };
+
+      if (status === 'confirmed') {
+        updateFilter.paymentStatus = 'paid';
+      }
+
+      const result = await db.collection('bookings').updateOne(
+        updateFilter,
+        {
+          $set: {
+            status,
+            updatedAt: new Date(),
+          },
+        }
+      );
+
+      if (result.modifiedCount === 0) {
+        return res.status(409).json({
+          message: 'Booking was updated by another request. Please refresh and try again.',
+        });
+      }
+
+      res.json({
+        message: 'Booking updated successfully',
       });
+    } catch (error) {
+      next(error);
     }
-
-    // Complete only confirmed bookings after rental end date
-    if (status === 'completed') {
-      if (booking.status !== 'confirmed') {
-        return res.status(409).json({
-          message: 'Only confirmed bookings can be completed',
-        });
-      }
-
-      if (new Date(booking.endDate) > new Date()) {
-        return res.status(409).json({
-          message: 'Rental period has not ended yet',
-        });
-      }
-    }
-
-    await db.collection('bookings').updateOne(
-      { _id: booking._id },
-      {
-        $set: {
-          status,
-          updatedAt: new Date(),
-        },
-      }
-    );
-
-    res.json({
-      message: 'Booking updated successfully',
-    });
-  } catch (error) {
-    next(error);
   }
-});
+);
 
 export default router;

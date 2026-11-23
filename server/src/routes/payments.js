@@ -7,6 +7,17 @@ import { authenticate, allowRoles } from '../middleware/auth.js';
 
 const router = Router();
 
+const idValues = (id) => {
+  const stringId = String(id);
+  const values = [stringId];
+
+  if (ObjectId.isValid(stringId)) {
+    values.push(new ObjectId(stringId));
+  }
+
+  return values;
+};
+
 function getCurrency() {
   const currency = (process.env.STRIPE_CURRENCY || 'usd').toLowerCase();
 
@@ -18,7 +29,12 @@ function getCurrency() {
 }
 
 function toMinorUnits(amount, currency) {
-  const zeroDecimalCurrencies = ['bif', 'clp', 'djf', 'gnf', 'jpy', 'kmf', 'krw', 'mga', 'pyg', 'rwf', 'ugx', 'vnd', 'vuv', 'xaf', 'xof', 'xpf'];
+  const zeroDecimalCurrencies = [
+    'bif', 'clp', 'djf', 'gnf', 'jpy', 'kmf', 'krw',
+    'mga', 'pyg', 'rwf', 'ugx', 'vnd', 'vuv', 'xaf',
+    'xof', 'xpf'
+  ];
+
   const threeDecimalCurrencies = ['bhd', 'jod', 'kwd', 'omr', 'tnd'];
 
   const decimals = zeroDecimalCurrencies.includes(currency)
@@ -41,7 +57,9 @@ router.post(
       }
 
       if (!process.env.STRIPE_SECRET_KEY) {
-        return res.status(503).json({ message: 'Payments are not configured' });
+        return res.status(503).json({
+          message: 'Payments are not configured'
+        });
       }
 
       const db = getDB();
@@ -49,13 +67,15 @@ router.post(
 
       const booking = await db.collection('bookings').findOne({
         _id: bookingId,
-        renterId: req.user._id,
+        renterId: { $in: idValues(req.user._id) },
         status: 'pending',
         paymentStatus: 'unpaid'
       });
 
       if (!booking) {
-        return res.status(404).json({ message: 'Pending booking not found' });
+        return res.status(404).json({
+          message: 'Pending booking not found'
+        });
       }
 
       if (booking.expiresAt && booking.expiresAt <= new Date()) {
@@ -67,19 +87,23 @@ router.post(
       const amount = Number(booking.amount);
 
       if (!Number.isFinite(amount) || amount <= 0 || amount > 100000000) {
-        return res.status(400).json({ message: 'Invalid booking amount' });
+        return res.status(400).json({
+          message: 'Invalid booking amount'
+        });
       }
 
       const currency = getCurrency();
       const amountMinor = toMinorUnits(amount, currency);
 
       if (!Number.isSafeInteger(amountMinor) || amountMinor <= 0) {
-        return res.status(400).json({ message: 'Invalid payment amount' });
+        return res.status(400).json({
+          message: 'Invalid payment amount'
+        });
       }
 
       const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-      // Reuse an existing active checkout session.
+      // Reuse an existing active session for this booking.
       const existing = await db.collection('payments').findOne({
         bookingId,
         status: 'pending'
@@ -111,45 +135,42 @@ router.post(
         );
       }
 
-      const expiresAt = booking.expiresAt || new Date(Date.now() + 30 * 60 * 1000);
+      const expiresAt =
+        booking.expiresAt || new Date(Date.now() + 30 * 60 * 1000);
+
       const expiresAtSeconds = Math.floor(expiresAt.getTime() / 1000);
 
-      const session = await stripe.checkout.sessions.create(
-        {
-          mode: 'payment',
-          expires_at: expiresAtSeconds,
+      const session = await stripe.checkout.sessions.create({
+        mode: 'payment',
+        expires_at: expiresAtSeconds,
 
-          success_url:
-            `${process.env.CLIENT_URL}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
+        success_url:
+          `${process.env.CLIENT_URL}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
 
-          cancel_url: `${process.env.CLIENT_URL}/payment/cancel`,
+        cancel_url: `${process.env.CLIENT_URL}/payment/cancel`,
 
-          line_items: [
-            {
-              price_data: {
-                currency,
-                product_data: {
-                  name: booking.equipmentTitle || 'Equipment rental'
-                },
-                unit_amount: amountMinor
+        line_items: [
+          {
+            price_data: {
+              currency,
+              product_data: {
+                name: booking.equipmentTitle || 'Equipment rental'
               },
-              quantity: 1
-            }
-          ],
-
-          metadata: {
-            bookingId: String(booking._id),
-            renterId: String(req.user._id)
+              unit_amount: amountMinor
+            },
+            quantity: 1
           }
-        },
-        {
-          idempotencyKey: `equiply-booking-${booking._id}`
+        ],
+
+        metadata: {
+          bookingId: String(booking._id),
+          renterId: String(req.user._id)
         }
-      );
+      });
 
       const payment = {
         bookingId,
-        renterId: req.user._id,
+        renterId: String(req.user._id),
         amount,
         amountMinor,
         currency,

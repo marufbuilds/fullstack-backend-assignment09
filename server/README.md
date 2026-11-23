@@ -23,3 +23,12 @@ Checkout: `POST /api/payments/checkout/:bookingId`. Webhook: `POST /api/payments
 
 ## Notes
 Credentials and environment files are not included in this package. MongoDB/Stripe/Google OAuth integration still requires your own credentials and local testing.
+
+## Owner ID migration (existing data)
+
+The server now normalizes user IDs and matches both string and BSON ObjectId ownership records. To migrate older equipment/bookings from one or more old owner IDs to the intended existing account, first set these variables in your terminal (do not put secrets in the script):
+
+- `OLD_OWNER_IDS`: comma-separated old IDs
+- `NEW_OWNER_ID`: the existing user's 24-character MongoDB ID
+
+Run `npm run migrate-owner` for a dry run. It makes no changes. After reviewing the counts and confirming the target account, run `npm run migrate-owner -- --apply`. The migration updates the target user's role to `owner` and rewrites matching equipment and booking owner IDs to strings. It does not create a user or alter unrelated records. Back up the database first.
