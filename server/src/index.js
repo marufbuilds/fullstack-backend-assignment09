@@ -1,41 +1,41 @@
  
-import 'dotenv/config';
-import express from 'express';
-import cors from 'cors';
-import helmet from 'helmet';
-import rateLimit from 'express-rate-limit';
-import { toNodeHandler } from 'better-auth/node';
+import "dotenv/config";
+import express from "express";
+import cors from "cors";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
+import { toNodeHandler } from "better-auth/node";
+import { ObjectId } from "mongodb";
 
-import { connectDB, getDB } from './db.js';
-import { createAuth } from './auth.js';
+import { connectDB, getDB } from "./db.js";
+import { createAuth } from "./auth.js";
 
-import equipmentRoutes from './routes/equipment.js';
-import bookingsRoutes from './routes/bookings.js';
-import favoritesRoutes from './routes/favorites.js';
-import adminRoutes from './routes/admin.js';
-import paymentRoutes from './routes/payments.js';
-import { stripeWebhook } from './routes/webhook.js';
-import ownerRoutes from './routes/owner.js';
+import equipmentRoutes from "./routes/equipment.js";
+import bookingsRoutes from "./routes/bookings.js";
+import favoritesRoutes from "./routes/favorites.js";
+import adminRoutes from "./routes/admin.js";
+import paymentRoutes from "./routes/payments.js";
+import { stripeWebhook } from "./routes/webhook.js";
+import ownerRoutes from "./routes/owner.js";
 
-import { authenticate } from './middleware/auth.js';
+import { authenticate } from "./middleware/auth.js";
 
 const app = express();
 
-app.set('trust proxy', 1);
+app.set("trust proxy", 1);
 
-// Required environment variables
-const required = ['MONGODB_URI', 'BETTER_AUTH_SECRET'];
-const missing = required.filter(key => !process.env[key]);
+const required = ["MONGODB_URI", "BETTER_AUTH_SECRET"];
+const missing = required.filter((key) => !process.env[key]);
 
 if (missing.length > 0) {
   console.error(
-    `Missing required environment variables: ${missing.join(', ')}`
+    `Missing required environment variables: ${missing.join(", ")}`
   );
   process.exit(1);
 }
 
 if (process.env.BETTER_AUTH_SECRET.length < 32) {
-  console.error('BETTER_AUTH_SECRET must contain at least 32 characters.');
+  console.error("BETTER_AUTH_SECRET must contain at least 32 characters.");
   process.exit(1);
 }
 
@@ -43,9 +43,11 @@ if (process.env.BETTER_AUTH_SECRET.length < 32) {
 app.use(helmet());
 
 // CORS
-const allowedOrigins = (process.env.CLIENT_URL || 'http://localhost:3000')
-  .split(',')
-  .map(value => value.trim())
+const allowedOrigins = (
+  process.env.CLIENT_URL || "http://localhost:3000"
+)
+  .split(",")
+  .map((value) => value.trim())
   .filter(Boolean);
 
 app.use(
@@ -55,62 +57,110 @@ app.use(
         return callback(null, true);
       }
 
-      return callback(new Error('Origin not allowed by CORS'));
+      return callback(new Error("Origin not allowed by CORS"));
     },
     credentials: true,
   })
 );
 
-// Request logging for debugging
+// Request logging
 app.use((req, res, next) => {
   console.log(`[REQUEST] ${req.method} ${req.originalUrl}`);
   next();
 });
 
-// Stripe webhook — raw body required
+// Stripe webhook
 app.post(
-  '/api/payments/webhook',
-  express.raw({ type: 'application/json' }),
+  "/api/payments/webhook",
+  express.raw({ type: "application/json" }),
   stripeWebhook
 );
 
-// JSON body parser
-app.use(express.json({ limit: '1mb' }));
+// JSON parser
+app.use(express.json({ limit: "1mb" }));
 
 // Health check
-app.get('/api/health', (req, res) => {
+app.get("/api/health", (req, res) => {
   res.json({ ok: true });
 });
 
-// Profile GET
-app.get('/api/profile', authenticate, (req, res) => {
-  const { _id, ...user } = req.user;
+// Find MongoDB user using Better Auth identity
+async function findCurrentUser(req) {
+  const db = getDB();
+  const conditions = [];
 
-  return res.json({
-    user: {
-      ...user,
-      id: String(req.user._id),
-    },
+  const userId = String(req.user.id || "");
+
+  conditions.push({ _id: userId });
+
+  if (ObjectId.isValid(userId)) {
+    conditions.push({ _id: new ObjectId(userId) });
+  }
+
+  if (req.user.email) {
+    conditions.push({
+      email: req.user.email.toLowerCase(),
+    });
+  }
+
+  return db.collection("users").findOne({
+    $or: conditions,
   });
+}
+
+// GET PROFILE
+app.get("/api/profile", authenticate, async (req, res) => {
+  try {
+    const dbUser = await findCurrentUser(req);
+
+    const role = String(dbUser?.role || "customer")
+      .toLowerCase()
+      .trim();
+
+    return res.json({
+      user: {
+        id: String(req.user.id),
+        _id: String(dbUser?._id || req.user._id),
+        name: dbUser?.name || req.user.name || "",
+        email: dbUser?.email || req.user.email || "",
+        image: dbUser?.image || req.user.image || null,
+        role,
+      },
+    });
+  } catch (error) {
+    console.error("Profile fetch error:", error);
+
+    return res.status(500).json({
+      message: "Failed to load profile",
+    });
+  }
 });
 
-// Profile PATCH
-app.patch('/api/profile', authenticate, async (req, res, next) => {
+// UPDATE PROFILE
+app.patch("/api/profile", authenticate, async (req, res) => {
   try {
     const name = req.body?.name;
 
     if (
-      typeof name !== 'string' ||
+      typeof name !== "string" ||
       name.trim().length < 2 ||
       name.trim().length > 80
     ) {
       return res.status(400).json({
-        message: 'Name must be between 2 and 80 characters',
+        message: "Name must be between 2 and 80 characters",
       });
     }
 
-    await getDB().collection('users').updateOne(
-      { _id: req.user._id },
+    const dbUser = await findCurrentUser(req);
+
+    if (!dbUser) {
+      return res.status(404).json({
+        message: "User not found",
+      });
+    }
+
+    await getDB().collection("users").updateOne(
+      { _id: dbUser._id },
       {
         $set: {
           name: name.trim(),
@@ -120,32 +170,43 @@ app.patch('/api/profile', authenticate, async (req, res, next) => {
     );
 
     return res.json({
-      message: 'Profile updated',
-      name: name.trim(),
+      message: "Profile updated successfully",
+      user: {
+        id: String(req.user.id),
+        _id: String(dbUser._id),
+        name: name.trim(),
+        email: dbUser.email || req.user.email,
+        role: String(dbUser.role || "customer").toLowerCase(),
+        image: dbUser.image || req.user.image || null,
+      },
     });
   } catch (error) {
-    next(error);
+    console.error("Profile update error:", error);
+
+    return res.status(500).json({
+      message: "Failed to update profile",
+    });
   }
 });
 
 // Equipment
-app.use('/api/equipment', equipmentRoutes);
+app.use("/api/equipment", equipmentRoutes);
 
 // Bookings
-app.use('/api/bookings', bookingsRoutes);
+app.use("/api/bookings", bookingsRoutes);
 
 // Favorites
-app.use('/api/favorites', favoritesRoutes);
+app.use("/api/favorites", favoritesRoutes);
 
 // Admin
-app.use('/api/admin', adminRoutes);
+app.use("/api/admin", adminRoutes);
 
 // Owner
-app.use('/api/owner', ownerRoutes);
+app.use("/api/owner", ownerRoutes);
 
 // Payments
 app.use(
-  '/api/payments',
+  "/api/payments",
   rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 30,
@@ -165,7 +226,7 @@ async function startServer() {
 
     // Better Auth routes
     app.all(
-      '/api/auth/*',
+      "/api/auth/*",
       rateLimit({
         windowMs: 15 * 60 * 1000,
         max: 80,
@@ -173,12 +234,12 @@ async function startServer() {
       authHandler
     );
 
-    // 404 handler
+    // 404
     app.use((req, res) => {
-      console.log('[404]', req.method, req.originalUrl);
+      console.log("[404]", req.method, req.originalUrl);
 
       return res.status(404).json({
-        message: 'Route not found',
+        message: "Route not found",
         path: req.originalUrl,
         method: req.method,
       });
@@ -190,29 +251,29 @@ async function startServer() {
         return next(error);
       }
 
-      if (error?.message === 'Origin not allowed by CORS') {
+      if (error?.message === "Origin not allowed by CORS") {
         return res.status(403).json({
-          message: 'Origin not allowed',
+          message: "Origin not allowed",
         });
       }
 
-      console.error('[SERVER ERROR]', error);
+      console.error("[SERVER ERROR]", error);
 
       return res.status(500).json({
-        message: 'Server error',
+        message: "Server error",
       });
     });
 
     app.listen(port, () => {
-      console.log('--------------------------------');
-      console.log('Equiply backend started');
+      console.log("--------------------------------");
+      console.log("Equiply backend started");
       console.log(`Port: ${port}`);
       console.log(`Health: http://localhost:${port}/api/health`);
       console.log(`Profile: http://localhost:${port}/api/profile`);
-      console.log('--------------------------------');
+      console.log("--------------------------------");
     });
   } catch (error) {
-    console.error('Backend startup failed:', error);
+    console.error("Backend startup failed:", error);
     process.exit(1);
   }
 }

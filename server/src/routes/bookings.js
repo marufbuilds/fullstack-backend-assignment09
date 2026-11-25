@@ -62,10 +62,10 @@ router.post('/', allowRoles('customer'), async (req, res, next) => {
       });
     }
 
-    // Prevent owners from renting their own equipment.
+    // Prevent renting your own equipment.
     if (
       idValues(req.user._id).some(
-        (id) => String(id) === String(equipment.ownerId)
+        (id) => normalizeId(id) === normalizeId(equipment.ownerId),
       )
     ) {
       return res.status(403).json({
@@ -95,7 +95,10 @@ router.post('/', allowRoles('customer'), async (req, res, next) => {
       });
     }
 
-    const days = Math.ceil((end - start) / 86400000);
+    const days = Math.ceil(
+      (end.getTime() - start.getTime()) / 86400000,
+    );
+
     const amount = days * Number(equipment.price);
 
     if (
@@ -110,7 +113,7 @@ router.post('/', allowRoles('customer'), async (req, res, next) => {
       });
     }
 
-    // New bookings always store IDs as strings.
+    // Always get the owner from the equipment record.
     const booking = {
       equipmentId: equipment._id,
       equipmentTitle: equipment.title,
@@ -155,25 +158,35 @@ router.get('/mine', async (req, res, next) => {
   }
 });
 
-// Owner bookings
-router.get('/owner', allowRoles('owner', 'admin'), async (req, res, next) => {
-  try {
-    const filter =
-      req.user.role === 'admin'
-        ? {}
-        : ownerFilter(req.user._id);
+// Owner Workspace bookings
+router.get(
+  '/owner',
+  allowRoles('owner', 'admin'),
+  async (req, res, next) => {
+    try {
+      const currentRole = String(req.user.role || '')
+        .trim()
+        .toLowerCase();
 
-    const items = await getDB()
-      .collection('bookings')
-      .find(filter)
-      .sort({ createdAt: -1 })
-      .toArray();
+      // Admin sees bookings belonging to all owners.
+      // Owner sees only bookings for their own equipment.
+      const filter =
+        currentRole === 'admin'
+          ? {}
+          : ownerFilter(req.user._id);
 
-    res.json(items);
-  } catch (error) {
-    next(error);
-  }
-});
+      const items = await getDB()
+        .collection('bookings')
+        .find(filter)
+        .sort({ createdAt: -1 })
+        .toArray();
+
+      res.json(items);
+    } catch (error) {
+      next(error);
+    }
+  },
+);
 
 // Update booking status
 router.patch(
@@ -182,6 +195,7 @@ router.patch(
   async (req, res, next) => {
     try {
       const routeId = String(req.params.id ?? '');
+
       if (!ObjectId.isValid(routeId)) {
         return res.status(400).json({
           message: 'Invalid id',
@@ -211,11 +225,18 @@ router.patch(
         });
       }
 
-      // Only the equipment owner or an admin can change this booking.
+      const currentRole = String(req.user.role || '')
+        .trim()
+        .toLowerCase();
+
+      const isAdmin = currentRole === 'admin';
+
+      // Owners can only manage their own bookings.
+      // Admins can manage bookings belonging to any owner.
       if (
-        req.user.role !== 'admin' &&
+        !isAdmin &&
         !idValues(req.user._id).some(
-          (id) => String(id) === String(booking.ownerId)
+          (id) => normalizeId(id) === normalizeId(booking.ownerId),
         )
       ) {
         return res.status(403).json({
@@ -223,7 +244,6 @@ router.patch(
         });
       }
 
-      // Confirm only paid, pending bookings.
       if (status === 'confirmed') {
         if (booking.status !== 'pending') {
           return res.status(409).json({
@@ -238,7 +258,6 @@ router.patch(
         }
       }
 
-      // Reject only unpaid pending bookings.
       if (status === 'rejected') {
         if (booking.status !== 'pending') {
           return res.status(409).json({
@@ -248,12 +267,12 @@ router.patch(
 
         if (booking.paymentStatus === 'paid') {
           return res.status(409).json({
-            message: 'A refund must be processed before rejecting a paid booking',
+            message:
+              'A refund must be processed before rejecting a paid booking',
           });
         }
       }
 
-      // Cancel pending or confirmed bookings.
       if (status === 'cancelled') {
         if (!['pending', 'confirmed'].includes(booking.status)) {
           return res.status(409).json({
@@ -261,15 +280,14 @@ router.patch(
           });
         }
 
-        // Do not cancel paid bookings without refund handling.
         if (booking.paymentStatus === 'paid') {
           return res.status(409).json({
-            message: 'A refund must be processed before cancelling a paid booking',
+            message:
+              'A refund must be processed before cancelling a paid booking',
           });
         }
       }
 
-      // Complete rentals after their rental period ends.
       if (status === 'completed') {
         if (booking.status !== 'confirmed') {
           return res.status(409).json({
@@ -300,12 +318,13 @@ router.patch(
             status,
             updatedAt: new Date(),
           },
-        }
+        },
       );
 
       if (result.modifiedCount === 0) {
         return res.status(409).json({
-          message: 'Booking was updated by another request. Please refresh and try again.',
+          message:
+            'Booking was updated by another request. Please refresh and try again.',
         });
       }
 
@@ -315,7 +334,7 @@ router.patch(
     } catch (error) {
       next(error);
     }
-  }
+  },
 );
 
 export default router;

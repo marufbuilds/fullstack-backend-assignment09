@@ -12,6 +12,8 @@ const validId = (id) => ObjectId.isValid(id);
 const escapeRegex = (value) =>
   String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+router.use(authenticate);
+
 // Get approved equipment
 router.get('/', async (req, res, next) => {
   try {
@@ -31,7 +33,9 @@ router.get('/', async (req, res, next) => {
 
     const filter = { status: 'approved' };
 
-    if (category) filter.category = String(category);
+    if (category) {
+      filter.category = String(category);
+    }
 
     if (location) {
       filter.location = {
@@ -43,7 +47,9 @@ router.get('/', async (req, res, next) => {
     if (minPrice !== undefined || maxPrice !== undefined) {
       const min = minPrice === undefined ? 0 : Number(minPrice);
       const max =
-        maxPrice === undefined ? Number.MAX_SAFE_INTEGER : Number(maxPrice);
+        maxPrice === undefined
+          ? Number.MAX_SAFE_INTEGER
+          : Number(maxPrice);
 
       if (
         !Number.isFinite(min) ||
@@ -100,7 +106,9 @@ router.get('/', async (req, res, next) => {
       filter._id = { $nin: conflicts };
     }
 
-    if (type) filter.rentalType = String(type);
+    if (type) {
+      filter.rentalType = String(type);
+    }
 
     if (search) {
       const term = escapeRegex(String(search).slice(0, 100));
@@ -155,6 +163,7 @@ router.get('/', async (req, res, next) => {
 router.get('/:id', async (req, res, next) => {
   try {
     const id = String(req.params.id ?? '');
+
     if (!validId(id)) {
       return res.status(400).json({
         message: 'Invalid id',
@@ -181,7 +190,6 @@ router.get('/:id', async (req, res, next) => {
 // Create equipment
 router.post(
   '/',
-  authenticate,
   allowRoles('owner', 'admin'),
   async (req, res, next) => {
     try {
@@ -219,7 +227,7 @@ router.post(
         rentalType: rentalType || 'daily',
         image: image || '',
 
-        // Standardize new owner IDs to strings.
+        // New equipment belongs to the account that created it.
         ownerId: normalizeId(req.user._id),
 
         status: 'pending',
@@ -237,18 +245,23 @@ router.post(
     } catch (error) {
       next(error);
     }
-  }
+  },
 );
 
-// Get owner's equipment
+// Get equipment for Owner Workspace
 router.get(
   '/owner/mine',
-  authenticate,
   allowRoles('owner', 'admin'),
   async (req, res, next) => {
     try {
+      const currentRole = String(req.user.role || '')
+        .trim()
+        .toLowerCase();
+
+      // Admin sees all equipment.
+      // Owner sees only their own equipment.
       const filter =
-        req.user.role === 'admin'
+        currentRole === 'admin'
           ? {}
           : ownerFilter(req.user._id);
 
@@ -262,18 +275,18 @@ router.get(
     } catch (error) {
       next(error);
     }
-  }
+  },
 );
 
 // Update equipment
 router.patch(
   '/:id',
-  authenticate,
   allowRoles('owner', 'admin'),
   async (req, res, next) => {
     try {
       const id = String(req.params.id ?? '');
-    if (!validId(id)) {
+
+      if (!validId(id)) {
         return res.status(400).json({
           message: 'Invalid id',
         });
@@ -291,10 +304,16 @@ router.patch(
         });
       }
 
+      const currentRole = String(req.user.role || '')
+        .trim()
+        .toLowerCase();
+
+      const isAdmin = currentRole === 'admin';
+
       if (
-        req.user.role !== 'admin' &&
+        !isAdmin &&
         !idValues(req.user._id).some(
-          (id) => String(id) === String(item.ownerId)
+          (value) => normalizeId(value) === normalizeId(item.ownerId),
         )
       ) {
         return res.status(403).json({
@@ -376,13 +395,14 @@ router.patch(
       updates.updatedAt = new Date();
 
       // Owner edits require moderation again.
-      if (req.user.role !== 'admin') {
+      // Admin edits do not reset the approval status.
+      if (!isAdmin) {
         updates.status = 'pending';
       }
 
       await db.collection('equipment').updateOne(
         { _id: item._id },
-        { $set: updates }
+        { $set: updates },
       );
 
       res.json({
@@ -392,17 +412,18 @@ router.patch(
     } catch (error) {
       next(error);
     }
-  }
+  },
 );
 
 // Delete equipment
 router.delete(
   '/:id',
-  authenticate,
+  allowRoles('owner', 'admin'),
   async (req, res, next) => {
     try {
       const id = String(req.params.id ?? '');
-    if (!validId(id)) {
+
+      if (!validId(id)) {
         return res.status(400).json({
           message: 'Invalid id',
         });
@@ -420,10 +441,16 @@ router.delete(
         });
       }
 
+      const currentRole = String(req.user.role || '')
+        .trim()
+        .toLowerCase();
+
+      const isAdmin = currentRole === 'admin';
+
       if (
-        req.user.role !== 'admin' &&
+        !isAdmin &&
         !idValues(req.user._id).some(
-          (id) => String(id) === String(item.ownerId)
+          (value) => normalizeId(value) === normalizeId(item.ownerId),
         )
       ) {
         return res.status(403).json({
@@ -441,7 +468,7 @@ router.delete(
     } catch (error) {
       next(error);
     }
-  }
+  },
 );
 
 export default router;

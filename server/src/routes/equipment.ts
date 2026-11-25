@@ -1,15 +1,10 @@
- 
-import { Router, Request, Response, NextFunction } from 'express';
+ import { Router, Request, Response, NextFunction } from 'express';
 import { ObjectId } from 'mongodb';
 
-// Load JavaScript modules
 import { getDB } from '../db.js';
 import { authenticate, allowRoles } from '../middleware/auth.js';
 
 const router = Router();
-
-// Always convert route IDs into a single string
- 
 
 const getParamId = (req: Request): string => String(req.params.id ?? '');
 const validId = (id: string) => ObjectId.isValid(id);
@@ -17,8 +12,8 @@ const validId = (id: string) => ObjectId.isValid(id);
 const escapeRegex = (value: string) =>
   String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-const ownerIdValues = (id: string) => {
-  const values: any[] = [String(id)];
+const ownerIdValues = (id: string): (string | ObjectId)[] => {
+  const values: (string | ObjectId)[] = [String(id)];
 
   if (ObjectId.isValid(String(id))) {
     values.push(new ObjectId(String(id)));
@@ -30,6 +25,11 @@ const ownerIdValues = (id: string) => {
 const ownerFilter = (id: string) => ({
   ownerId: { $in: ownerIdValues(id) },
 });
+
+const isOwnerOfItem = (userId: string, itemOwnerId: unknown) =>
+  ownerIdValues(userId).some(
+    (id) => String(id) === String(itemOwnerId),
+  );
 
 // GET: All approved equipment
 router.get('/', async (req: Request, res: Response, next: NextFunction) => {
@@ -78,7 +78,7 @@ router.get('/', async (req: Request, res: Response, next: NextFunction) => {
       filter.price = { $gte: min, $lte: max };
     }
 
-    // Check rental date availability
+    // Rental date availability
     if (availableFrom !== undefined || availableTo !== undefined) {
       const start = new Date(String(availableFrom));
       const end = new Date(String(availableTo));
@@ -212,7 +212,9 @@ router.post(
         typeof description !== 'string' ||
         description.trim().length < 10 ||
         typeof category !== 'string' ||
+        !category.trim() ||
         typeof location !== 'string' ||
+        !location.trim() ||
         !Number.isFinite(Number(price)) ||
         Number(price) <= 0
       ) {
@@ -221,16 +223,20 @@ router.post(
         });
       }
 
-      const userId = String((req as any).user._id);
+      const user = (req as any).user;
+      const userId = String(user._id);
 
       const item = {
         title: title.trim().slice(0, 120),
         description: description.trim().slice(0, 3000),
-        category,
+        category: category.trim(),
         location: location.trim().slice(0, 150),
         price: Number(price),
-        rentalType: rentalType || 'daily',
-        image: image || '',
+        rentalType:
+          typeof rentalType === 'string' && rentalType.trim()
+            ? rentalType.trim()
+            : 'daily',
+        image: typeof image === 'string' ? image : '',
         ownerId: userId,
         status: 'pending',
         createdAt: new Date(),
@@ -247,7 +253,7 @@ router.post(
     } catch (error) {
       next(error);
     }
-  }
+  },
 );
 
 // GET: Owner equipment
@@ -274,7 +280,7 @@ router.get(
     } catch (error) {
       next(error);
     }
-  }
+  },
 );
 
 // PATCH: Update equipment
@@ -303,9 +309,7 @@ router.patch(
 
       if (
         user.role !== 'admin' &&
-        !ownerIdValues(String(user._id)).some(
-          (ownerId) => String(ownerId) === String(item.ownerId)
-        )
+        !isOwnerOfItem(String(user._id), item.ownerId)
       ) {
         return res.status(403).json({ message: 'Not allowed' });
       }
@@ -384,7 +388,7 @@ router.patch(
 
       await db.collection('equipment').updateOne(
         { _id: item._id },
-        { $set: updates }
+        { $set: updates },
       );
 
       res.json({
@@ -394,13 +398,14 @@ router.patch(
     } catch (error) {
       next(error);
     }
-  }
+  },
 );
 
 // DELETE: Equipment
 router.delete(
   '/:id',
   authenticate,
+  allowRoles('owner', 'admin'),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const id = getParamId(req);
@@ -422,9 +427,7 @@ router.delete(
 
       if (
         user.role !== 'admin' &&
-        !ownerIdValues(String(user._id)).some(
-          (ownerId) => String(ownerId) === String(item.ownerId)
-        )
+        !isOwnerOfItem(String(user._id), item.ownerId)
       ) {
         return res.status(403).json({ message: 'Not allowed' });
       }
@@ -437,7 +440,7 @@ router.delete(
     } catch (error) {
       next(error);
     }
-  }
+  },
 );
 
 export default router;

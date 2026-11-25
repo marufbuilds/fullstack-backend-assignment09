@@ -1,6 +1,4 @@
- 
-import { Router } from 'express';
-import { ObjectId } from 'mongodb';
+ import { Router } from 'express';
 import { getDB } from '../db.js';
 import { authenticate, allowRoles } from '../middleware/auth.js';
 import { idValues } from '../lib/ids.js';
@@ -12,65 +10,69 @@ router.use(authenticate, allowRoles('owner', 'admin'));
 router.get('/analytics', async (req, res, next) => {
   try {
     const db = getDB();
+    const isAdmin = req.user.role === 'admin';
 
-    const ownerFilter =
-      req.user.role === 'admin'
-        ? {}
-        : { ownerId: { $in: idValues(req.user._id) } };
+    const equipmentFilter = isAdmin
+      ? {}
+      : { ownerId: { $in: idValues(req.user._id) } };
+
+    const bookingFilter = isAdmin
+      ? {}
+      : { ownerId: { $in: idValues(req.user._id) } };
 
     const [
       listingCount,
       completedRentals,
       paidBookings,
-      monthly
+      monthly,
     ] = await Promise.all([
-      db.collection('equipment').countDocuments(ownerFilter),
+      db.collection('equipment').countDocuments(equipmentFilter),
 
       db.collection('bookings').countDocuments({
-        ...ownerFilter,
-        status: 'completed'
+        ...bookingFilter,
+        status: 'completed',
       }),
 
       db.collection('bookings')
         .find({
-          ...ownerFilter,
-          paymentStatus: 'paid'
+          ...bookingFilter,
+          paymentStatus: 'paid',
         })
         .toArray(),
 
       db.collection('bookings').aggregate([
         {
           $match: {
-            ...ownerFilter,
+            ...bookingFilter,
             paymentStatus: 'paid',
-            paidAt: { $type: 'date' }
-          }
+            paidAt: { $type: 'date' },
+          },
         },
         {
           $group: {
             _id: {
               year: { $year: '$paidAt' },
-              month: { $month: '$paidAt' }
+              month: { $month: '$paidAt' },
             },
             earnings: { $sum: '$amount' },
-            rentals: { $sum: 1 }
-          }
+            rentals: { $sum: 1 },
+          },
         },
         {
           $sort: {
             '_id.year': 1,
-            '_id.month': 1
-          }
+            '_id.month': 1,
+          },
         },
         {
-          $limit: 24
-        }
-      ]).toArray()
+          $limit: 24,
+        },
+      ]).toArray(),
     ]);
 
     const totalEarnings = paidBookings.reduce(
       (sum, booking) => sum + Number(booking.amount || 0),
-      0
+      0,
     );
 
     res.json({
@@ -82,8 +84,8 @@ router.get('/analytics', async (req, res, next) => {
         year: row._id.year,
         month: row._id.month,
         earnings: Number(Number(row.earnings || 0).toFixed(2)),
-        rentals: row.rentals
-      }))
+        rentals: row.rentals,
+      })),
     });
   } catch (error) {
     next(error);
