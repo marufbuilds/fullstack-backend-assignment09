@@ -33,10 +33,13 @@ function toMinorUnits(amount, currency) {
             : 2;
     return Math.round(Number(amount) * (10 ** decimals));
 }
+// Create Stripe Checkout session
 router.post('/checkout/:bookingId', authenticate, allowRoles('customer'), async (req, res, next) => {
     try {
         if (!ObjectId.isValid(req.params.bookingId)) {
-            return res.status(400).json({ message: 'Invalid booking' });
+            return res.status(400).json({
+                message: 'Invalid booking'
+            });
         }
         if (!process.env.STRIPE_SECRET_KEY) {
             return res.status(503).json({
@@ -45,6 +48,7 @@ router.post('/checkout/:bookingId', authenticate, allowRoles('customer'), async 
         }
         const db = getDB();
         const bookingId = new ObjectId(req.params.bookingId);
+        // Only the customer who created the booking can pay.
         const booking = await db.collection('bookings').findOne({
             _id: bookingId,
             renterId: { $in: idValues(req.user._id) },
@@ -75,7 +79,7 @@ router.post('/checkout/:bookingId', authenticate, allowRoles('customer'), async 
             });
         }
         const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
-        // Reuse an existing active session for this booking.
+        // Reuse an existing active checkout session.
         const existing = await db.collection('payments').findOne({
             bookingId,
             status: 'pending'
@@ -83,14 +87,19 @@ router.post('/checkout/:bookingId', authenticate, allowRoles('customer'), async 
         if (existing?.checkoutSessionId) {
             const oldSession = await stripe.checkout.sessions.retrieve(existing.checkoutSessionId);
             if (oldSession.status === 'open' && oldSession.url) {
-                return res.json({ url: oldSession.url });
+                return res.json({
+                    url: oldSession.url
+                });
             }
             if (oldSession.status === 'complete') {
                 return res.status(409).json({
                     message: 'Payment is being processed. Please refresh your bookings.'
                 });
             }
-            await db.collection('payments').updateOne({ _id: existing._id, status: 'pending' }, {
+            await db.collection('payments').updateOne({
+                _id: existing._id,
+                status: 'pending'
+            }, {
                 $set: {
                     status: 'expired',
                     expiredAt: new Date()
@@ -99,6 +108,9 @@ router.post('/checkout/:bookingId', authenticate, allowRoles('customer'), async 
         }
         const expiresAt = booking.expiresAt || new Date(Date.now() + 30 * 60 * 1000);
         const expiresAtSeconds = Math.floor(expiresAt.getTime() / 1000);
+        // Keep original owner and renter information.
+        const ownerId = String(booking.ownerId);
+        const renterId = String(req.user._id);
         const session = await stripe.checkout.sessions.create({
             mode: 'payment',
             expires_at: expiresAtSeconds,
@@ -118,12 +130,15 @@ router.post('/checkout/:bookingId', authenticate, allowRoles('customer'), async 
             ],
             metadata: {
                 bookingId: String(booking._id),
-                renterId: String(req.user._id)
+                renterId,
+                ownerId
             }
         });
+        // Save payment data including ownerId for owner tracking.
         const payment = {
             bookingId,
-            renterId: String(req.user._id),
+            ownerId,
+            renterId,
             amount,
             amountMinor,
             currency,
@@ -133,7 +148,9 @@ router.post('/checkout/:bookingId', authenticate, allowRoles('customer'), async 
             createdAt: new Date()
         };
         await db.collection('payments').insertOne(payment);
-        return res.json({ url: session.url });
+        return res.json({
+            url: session.url
+        });
     }
     catch (error) {
         return next(error);

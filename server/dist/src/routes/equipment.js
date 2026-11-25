@@ -1,10 +1,8 @@
 import { Router } from 'express';
 import { ObjectId } from 'mongodb';
-// Load JavaScript modules
 import { getDB } from '../db.js';
 import { authenticate, allowRoles } from '../middleware/auth.js';
 const router = Router();
-// Always convert route IDs into a single string
 const getParamId = (req) => String(req.params.id ?? '');
 const validId = (id) => ObjectId.isValid(id);
 const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -18,6 +16,7 @@ const ownerIdValues = (id) => {
 const ownerFilter = (id) => ({
     ownerId: { $in: ownerIdValues(id) },
 });
+const isOwnerOfItem = (userId, itemOwnerId) => ownerIdValues(userId).some((id) => String(id) === String(itemOwnerId));
 // GET: All approved equipment
 router.get('/', async (req, res, next) => {
     try {
@@ -44,7 +43,7 @@ router.get('/', async (req, res, next) => {
             }
             filter.price = { $gte: min, $lte: max };
         }
-        // Check rental date availability
+        // Rental date availability
         if (availableFrom !== undefined || availableTo !== undefined) {
             const start = new Date(String(availableFrom));
             const end = new Date(String(availableTo));
@@ -145,22 +144,27 @@ router.post('/', authenticate, allowRoles('owner', 'admin'), async (req, res, ne
             typeof description !== 'string' ||
             description.trim().length < 10 ||
             typeof category !== 'string' ||
+            !category.trim() ||
             typeof location !== 'string' ||
+            !location.trim() ||
             !Number.isFinite(Number(price)) ||
             Number(price) <= 0) {
             return res.status(400).json({
                 message: 'Required fields and positive price are needed',
             });
         }
-        const userId = String(req.user._id);
+        const user = req.user;
+        const userId = String(user._id);
         const item = {
             title: title.trim().slice(0, 120),
             description: description.trim().slice(0, 3000),
-            category,
+            category: category.trim(),
             location: location.trim().slice(0, 150),
             price: Number(price),
-            rentalType: rentalType || 'daily',
-            image: image || '',
+            rentalType: typeof rentalType === 'string' && rentalType.trim()
+                ? rentalType.trim()
+                : 'daily',
+            image: typeof image === 'string' ? image : '',
             ownerId: userId,
             status: 'pending',
             createdAt: new Date(),
@@ -211,7 +215,7 @@ router.patch('/:id', authenticate, allowRoles('owner', 'admin'), async (req, res
             return res.status(404).json({ message: 'Equipment not found' });
         }
         if (user.role !== 'admin' &&
-            !ownerIdValues(String(user._id)).some((ownerId) => String(ownerId) === String(item.ownerId))) {
+            !isOwnerOfItem(String(user._id), item.ownerId)) {
             return res.status(403).json({ message: 'Not allowed' });
         }
         const allowed = [
@@ -280,7 +284,7 @@ router.patch('/:id', authenticate, allowRoles('owner', 'admin'), async (req, res
     }
 });
 // DELETE: Equipment
-router.delete('/:id', authenticate, async (req, res, next) => {
+router.delete('/:id', authenticate, allowRoles('owner', 'admin'), async (req, res, next) => {
     try {
         const id = getParamId(req);
         if (!validId(id)) {
@@ -295,7 +299,7 @@ router.delete('/:id', authenticate, async (req, res, next) => {
             return res.status(404).json({ message: 'Not found' });
         }
         if (user.role !== 'admin' &&
-            !ownerIdValues(String(user._id)).some((ownerId) => String(ownerId) === String(item.ownerId))) {
+            !isOwnerOfItem(String(user._id), item.ownerId)) {
             return res.status(403).json({ message: 'Not allowed' });
         }
         await db.collection('equipment').deleteOne({

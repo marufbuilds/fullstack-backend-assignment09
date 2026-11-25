@@ -45,8 +45,8 @@ router.post('/', allowRoles('customer'), async (req, res, next) => {
                 message: 'Equipment unavailable',
             });
         }
-        // Prevent owners from renting their own equipment.
-        if (idValues(req.user._id).some((id) => String(id) === String(equipment.ownerId))) {
+        // Prevent renting your own equipment.
+        if (idValues(req.user._id).some((id) => normalizeId(id) === normalizeId(equipment.ownerId))) {
             return res.status(403).json({
                 message: 'You cannot rent your own equipment',
             });
@@ -71,7 +71,7 @@ router.post('/', allowRoles('customer'), async (req, res, next) => {
                 message: 'Dates unavailable',
             });
         }
-        const days = Math.ceil((end - start) / 86400000);
+        const days = Math.ceil((end.getTime() - start.getTime()) / 86400000);
         const amount = days * Number(equipment.price);
         if (!Number.isSafeInteger(days) ||
             days < 1 ||
@@ -82,7 +82,7 @@ router.post('/', allowRoles('customer'), async (req, res, next) => {
                 message: 'Rental duration or total price is invalid',
             });
         }
-        // New bookings always store IDs as strings.
+        // Always get the owner from the equipment record.
         const booking = {
             equipmentId: equipment._id,
             equipmentTitle: equipment.title,
@@ -124,10 +124,15 @@ router.get('/mine', async (req, res, next) => {
         next(error);
     }
 });
-// Owner bookings
+// Owner Workspace bookings
 router.get('/owner', allowRoles('owner', 'admin'), async (req, res, next) => {
     try {
-        const filter = req.user.role === 'admin'
+        const currentRole = String(req.user.role || '')
+            .trim()
+            .toLowerCase();
+        // Admin sees bookings belonging to all owners.
+        // Owner sees only bookings for their own equipment.
+        const filter = currentRole === 'admin'
             ? {}
             : ownerFilter(req.user._id);
         const items = await getDB()
@@ -166,14 +171,18 @@ router.patch('/:id/status', allowRoles('owner', 'admin'), async (req, res, next)
                 message: 'Booking not found',
             });
         }
-        // Only the equipment owner or an admin can change this booking.
-        if (req.user.role !== 'admin' &&
-            !idValues(req.user._id).some((id) => String(id) === String(booking.ownerId))) {
+        const currentRole = String(req.user.role || '')
+            .trim()
+            .toLowerCase();
+        const isAdmin = currentRole === 'admin';
+        // Owners can only manage their own bookings.
+        // Admins can manage bookings belonging to any owner.
+        if (!isAdmin &&
+            !idValues(req.user._id).some((id) => normalizeId(id) === normalizeId(booking.ownerId))) {
             return res.status(403).json({
                 message: 'Not allowed',
             });
         }
-        // Confirm only paid, pending bookings.
         if (status === 'confirmed') {
             if (booking.status !== 'pending') {
                 return res.status(409).json({
@@ -186,7 +195,6 @@ router.patch('/:id/status', allowRoles('owner', 'admin'), async (req, res, next)
                 });
             }
         }
-        // Reject only unpaid pending bookings.
         if (status === 'rejected') {
             if (booking.status !== 'pending') {
                 return res.status(409).json({
@@ -199,21 +207,18 @@ router.patch('/:id/status', allowRoles('owner', 'admin'), async (req, res, next)
                 });
             }
         }
-        // Cancel pending or confirmed bookings.
         if (status === 'cancelled') {
             if (!['pending', 'confirmed'].includes(booking.status)) {
                 return res.status(409).json({
                     message: 'This booking cannot be cancelled',
                 });
             }
-            // Do not cancel paid bookings without refund handling.
             if (booking.paymentStatus === 'paid') {
                 return res.status(409).json({
                     message: 'A refund must be processed before cancelling a paid booking',
                 });
             }
         }
-        // Complete rentals after their rental period ends.
         if (status === 'completed') {
             if (booking.status !== 'confirmed') {
                 return res.status(409).json({
